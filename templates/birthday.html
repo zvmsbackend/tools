@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block container %}
+
+{% if login %}
+{% if profile %}
+<h1>{{profile[0]}}</h1>
+<p>你的生日是{{profile[1]}}年{{profile[2]}}月{{profile[3]}}日</p>
+{% else %}
+<form method="POST">
+    <div class="form-group">
+        <label class="form-label" for="birthday">输入你的生日(ISO格式, 如2006-12-09): </label>
+        <input class="form-control" type="text" name="birthday">
+    </div>
+    <button class="btn btn-primary" type="submit">确定</button>
+</form>
+<p>注意, <u>生日注册后不可修改</u></p>
+{% endif %}
+{% else %}
+<h1>未登录</h1>
+{% endif %}
+<p>有<strong>{{count}}</strong>人注册了生日</p>
+<h3>今天的生日祝福: </h3>
+<ul class="list-group">
+    {% for name in today %}
+    <li class="list-group-item">{{name}}</li>
+    {% endfor %}
+</ul>
+<h3>本月的生日祝福: </h3>
+<ul class="birthday-ul">
+    {% for name, day in thismonth %}
+    <li>{{name}} {{month}}-{{day}}</li>
+    {% endfor %}
+</ul>
+
+{% endblock %}

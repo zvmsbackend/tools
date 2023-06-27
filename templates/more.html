@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block container %}
+<ul class="list-group">
+    {% for i in more %}
+    <li class="list-group-item">{{i}}</li>
+    {% endfor %}
+</ul>
+<ul class="pagination">
+    {% for i in pages %}
+    <li class="page-item"><a class="page-link" href="/more?word={{word}}&offset={{i}}">{{i}}</a></li>
+    {% endfor %}
+</ul>
+<form>
+    <input type="hidden" name="word" value="{{word}}">
+    <div class="row">
+        <div class="col">
+            <input class="form-control" type="text" name="offset" placeholder="跳转到页数">
+        </div>
+        <div class="col-4">
+            <button class="btn btn-primary" type="submit">确定</button>
+        </div>
+    </div>
+</form>
+{% endblock %}
