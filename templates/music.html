@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block container %}
+<h2>{{title}}</h2>
+<!-- <ul>
+    {% for artist in artists %}
+    <li>{{artist.name}}</li>
+    {% endfor %}
+</ul> -->
+<div class="row">
+    <div class="col-4">
+        <label for="volume" class="form-label">调节音量</label>
+    </div>
+    <div class="col">
+        <input id="volume" class="form-range" type="range" min="0" max="100" value="50">
+    </div>
+</div>
+<div class="progress">
+    <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+</div>
+<div class="row">
+    <div class="col">
+        <button type="button" class="form-control" id="pause">暂停</button>
+    </div>
+    <div class="col">
+        <button type="button" class="form-control" id="play">播放</button>
+    </div>
+    <div class="col">
+        <button type="button" class="form-control" id="backward">快退</button>
+    </div>
+    <div class="col">
+        <button type="button" class="form-control" id="forward">快进</button>
+    </div>
+</div>
+<script>
+    const url = '{{url|safe}}';
+</script>
+<script src="/static/js/heartbeat.js"></script>
+<script>
+    const audio = new Audio(url);
+    audio.load();
+    audio.volume = 0.5;
+    const volume = document.getElementById('volume');
+    const progress = document.getElementById('progress-bar');
+    volume.addEventListener('change', (e) => {
+        audio.volume = volume.value / 100;
+    });
+    audio.currentTime = 0;
+    audio.addEventListener('timeupdate', (e) => {
+        progress.style = `width: ${audio.currentTime / audio.duration * 100}%`;
+    });
+    document.getElementById('pause').addEventListener('click', (e) => {
+        audio.pause();
+    });
+    document.getElementById('play').addEventListener('click', (e) => {
+        audio.play();
+    });
+    document.getElementById('backward').addEventListener('click', (e) => {
+        if (audio.currentTime > 10) {
+            audio.currentTime -= 10;
+        }
+    });
+    document.getElementById('forward').addEventListener('click', (e) => {
+        if (audio.currentTime < audio.duration - 10) {
+            audio.currentTime += 10;
+        }
+    });
+    heartbeat(
+        false, 
+        (json) => json.music,
+        () => {
+            audio.pause();
+            delete audio;
+            document.getElementById('container').innerHTML = `
+            <div class="alert alert-danger">
+                <div class="card-body">广播站已关闭</div>
+            </div>`;
+        }
+    );
+</script>
+{% endblock %}

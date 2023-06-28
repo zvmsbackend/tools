@@ -35,6 +35,7 @@
     const autospeed = {{autospeed}};
     const offline = {{offline}};
 </script>
+<script src="/static/js/heartbeat.js"></script>
 <script>
     const audio = new Audio('/static/misc/muyu.mp3');
     const btn = document.getElementById('btn');
@@ -47,28 +48,22 @@
     let count = 0;
     let foo;
     let bar;
-    //let baz;
+    let baz;
     function autoclick() {
         btn.click();
         bar = setTimeout(autoclick, autospeed);
     }
-    async function heartbeat() {
-        let xhr = new XMLHttpRequest();
-        xhr.open('GET', '/muyu-enabled', true);
-        xhr.onreadystatechange = function() {
-            if ((!offline && xhr.status != 200) || !JSON.parse(xhr.responseText)) {
-                clearTimeout(baz);
-                document.getElementById('container').innerHTML = `
-                <div class="alert alert-danger">
+    heartbeat(
+        offline, 
+        (json) => json.muyu,
+        () => {
+            document.getElementById('container').innerHTML = `
+            <div class="alert alert-danger">
                 <div class="card-body">都什么年代了还在抽传统反馈</div>
-                </div>
-                `;
-            }
-        };
-        xhr.send();
-        baz = setTimeout(heartbeat, 10000);
-    }
-    heartbeat();
+            </div>
+            `;
+        }
+    );
     auto.addEventListener('click', (e) => {
         if (!auto.checked) {
             clearTimeout(bar);

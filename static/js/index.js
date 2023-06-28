@@ -88,8 +88,9 @@ function detectGenshin(input) {
     let value = input.value.toUpperCase();
     for (let word of forbiddenWords) {
         if (value.includes(word)) {
-            document.getElementById('container').innerHTML = `<div class="alert alert-danger">
-            <div class="card-body">我超, 原!</div>
+            document.getElementById('container').innerHTML = `
+            <div class="alert alert-danger">
+                <div class="card-body">我超, 原!</div>
             </div>`;
             return true;
         }

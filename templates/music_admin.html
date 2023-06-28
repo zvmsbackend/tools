@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block container %}
+<form action="/music-search">
+    <div class="form-group">
+        <label class="form-label" for="keyword">关键词:</label>
+        <input id="keyword" name="keyword" type="text" class="form-control" placeholder="输入关键词">
+    </div>
+    <button class="btn btn-primary" type="submit">确定</button>
+</form>
+<br>
+<form method="POST">
+    <input type="hidden" name="music" value="{{0 if music else 1}}">
+    <button type="submit" class="btn btn-primary">{{'关闭' if music else '打开'}}音乐</button>
+</form>
+{% endblock %}

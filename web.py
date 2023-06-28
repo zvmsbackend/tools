@@ -55,22 +55,24 @@ for user, aisession in execute_sql('SELECT user, session FROM ai'):
 with open('words.txt', encoding='utf-8') as file:
     words = list(map(str.strip, file))
 
-daily_updated = {
+assets = {
     'today': date.today(),
     'hitokoto': {},
     'the_wors': '',
     'news': {},
-    'wallpapers': []
+    'wallpapers': [],
+    'music': None
 }
 settings = {
     'muyu': True,
     'sound': True,
     'speed': 333,
-    'offline': False
+    'offline': False,
+    'music': False
 }
 
-def save_updated():
-    tmp = daily_updated.copy()
+def save_assets():
+    tmp = assets.copy()
     tmp['today'] = tmp['today'].isoformat()
     with open('assets.json', 'w', encoding='utf-8') as file:
         json.dump(tmp, file, ensure_ascii=False)
@@ -82,21 +84,21 @@ def get_hitokoto():
         ...
     else:
         if res.status_code == 200:
-            daily_updated['hitokoto'] = json.loads(res.text)
+            assets['hitokoto'] = json.loads(res.text)
             return
-    daily_updated['hitokoto'] = {
+    assets['hitokoto'] = {
         'hitokoto': 'https://v1.hitokoto.cn坏掉了',
         'from_who': '系统',
         'from': '错误信息'
     }
-    save_updated()
+    save_assets()
 
 def update(clear_muyu=True):
-    daily_updated['today'] = date.today()
+    assets['today'] = date.today()
     
     text = requests.get('https://cctv.cn').content.decode()
     soup = bs4.BeautifulSoup(text, 'lxml')
-    daily_updated['news'] = dict(
+    assets['news'] = dict(
         focus=list(map(Tag.get_text, soup.find('div', {'class': 'boxTitle'}).find_all('div', class_='title'))),
         **{categ: list(map(Tag.get_text, content.find_all('li')))
             for categ, content in zip(['social', 'global'], soup.find_all('div', {'class': 'col_w380_r'}))},
@@ -104,18 +106,18 @@ def update(clear_muyu=True):
     )
     
     res = requests.get('https://bing.com/HPImageArchive.aspx?format=js&idx=0&n=7')
-    daily_updated['wallpapers'] = []
+    assets['wallpapers'] = []
     for i, img in enumerate(json.loads(res.text)['images']):
-        daily_updated['wallpapers'].append((i, {
+        assets['wallpapers'].append((i, {
             'url': 'https://bing.com' + img['url'],
             'title': img['title'],
             'copyright': img['copyright']
         }))
 
-    daily_updated['the_word'] = random.choice(words)
+    assets['the_word'] = random.choice(words)
     get_hitokoto()
 
-    save_updated()
+    save_assets()
     logger.info('Updated')
     
     if not clear_muyu:
@@ -180,7 +182,7 @@ def view(fn):
     def wrapper(*args, **kwargs):
         if request.remote_addr == '172.31.33.251':
             abort(500)
-        if date.today() != daily_updated['today']:
+        if date.today() != assets['today']:
             update()
         try:
             ret = fn(*args, **kwargs)
@@ -202,7 +204,7 @@ def index():
             args['times'] = execute_sql(
                 'SELECT COUNT(*) FROM issue WHERE author = :id AND time > :today', 
                 id=id, 
-                today=daily_updated['today']
+                today=assets['today']
             ).fetchone()[0]
             args['issues'] = map(itemgetter(0), execute_sql(
                 'SELECT content FROM issue WHERE author = :id ORDER BY ID DESC',
@@ -243,7 +245,7 @@ def icon():
 def issues(id: int):
     times = execute_sql('SELECT COUNT(*) FROM issue WHERE author = :id AND time > :today',
         id=id,
-        today=daily_updated['today']
+        today=assets['today']
     ).fetchone()[0]
     if times >= 5:
         return render_template('error.html', msg='反馈已达上限')
@@ -399,23 +401,23 @@ def wenyan():
 @app.route('/hitokoto')
 @view
 def hitokoto():
-    return render_template('hitokoto.html', **daily_updated['hitokoto'])
+    return render_template('hitokoto.html', **assets['hitokoto'])
 
 @app.route('/word')
 @view
 def word_sharing():
-    return redirect('/query?verbose=yes&word=' + daily_updated['the_word'])
+    return redirect('/query?verbose=yes&word=' + assets['the_word'])
 
 @app.route('/news')
 @view
 def news():
-    return render_template('news.html', **daily_updated['news'])
+    return render_template('news.html', **assets['news'])
 
 @app.route('/birthday', methods=['GET', 'POST'])
 @view
 def birthday():
     if request.method == 'GET':
-        today = daily_updated['today']
+        today = assets['today']
         args = {}
         args['today'] = map(itemgetter(0), execute_sql(
             'SELECT name '
@@ -466,7 +468,7 @@ def birthday():
 def bing_wallpapers():
     return render_template(
         'wallpaper.html', 
-        imgs=daily_updated['wallpapers']
+        imgs=assets['wallpapers']
     )
 
 @app.route('/weather')
@@ -550,9 +552,12 @@ def muyu_ranking():
         anonymous=anonymous
     )
 
-@app.route('/muyu-enabled')
+@app.route('/heartbeat')
 def muyu_enabled():
-    return ('false', 'true')[settings['muyu']]
+    return json.dumps({
+        'muyu': settings['muyu'],
+        'music': settings['music']
+    })
 
 @app.route('/edit-notices', methods=['GET', 'POST'])
 @view
@@ -585,7 +590,7 @@ def ai(id: int):
     count = execute_sql(
         'SELECT COUNT(*) FROM aichat WHERE user = :id AND time > :today', 
         id=id, 
-        today=daily_updated['today']
+        today=assets['today']
     ).fetchone()[0]
     if request.method == 'GET':
         res = execute_sql('SELECT human, content FROM aichat WHERE user = :id ORDER BY time', id=id).fetchall()
@@ -616,6 +621,41 @@ def ai(id: int):
         execute_sql('UPDATE ai SET session = :session WHERE user = :user', user=id, session=aisession)
     return redirect('/ai')
 
+@app.route('/music-search', methods=['GET', 'POST'])
+@view
+def music_search():
+    if session.get('id') != '20220905':
+        return render_template('error.html', msg='FUCK YOU')
+    if request.method == 'GET':
+        data = json.loads(requests.get(
+            'https://music-api.tonzhon.com/search?keyword={}&platform=qq&limit=25'.format(request.args.get('keyword'))
+        ).text)['data']['songs']
+        for datum in data:
+            datum['url'] = json.loads(requests.get('https://music-api.tonzhon.com/song_file/' + datum['newId']).text)['data']['songSource']
+        return render_template('music_search.html', data=data)
+    assets['music'] = dict(request.form)
+    save_assets()
+    return render_template('success.html', msg='音乐已设置为{}'.format(assets['music']['title']))
+
+@app.route('/music-admin', methods=['GET', 'POST'])
+@view
+def music_admin():
+    if session.get('id') != '20220905':
+        return render_template('error.html', msg='FUCK YOU')
+    if request.method == 'GET':
+        return render_template('music_admin.html', music=settings['music'])
+    save_settings(music=bool(int(request.form.get('music'))))
+    return render_template('success.html', msg='音乐已{}'.format('打开' if settings['music'] else '关闭'))
+
+@app.route('/music')
+@view
+def radio_station():
+    if not settings['music']:
+        return render_template('error.html', msg='广播站已关闭')
+    if not assets['music']:
+        return render_template('error.html', msg='今天没有音乐')
+    return render_template('music.html', **assets['music'])
+
 @app.route('/admin', methods=['GET', 'POST'])
 @view
 def admin():
@@ -641,8 +681,8 @@ def admin():
             get_hitokoto()
             return redirect('/hitokoto')
         case {'task': 'edit-saying', **rest}:
-            daily_updated['hitokoto'] = rest
-            save_updated()
+            assets['hitokoto'] = rest
+            save_assets()
             return redirect('/hitokoto')
         case {'task': 'send-notice', 'target': target, 'html': html}:
             execute_sql(
@@ -723,8 +763,8 @@ if __name__ == '__main__':
     except OSError:
         update(False)
     else:
-        daily_updated = json.load(file)
-        daily_updated['today'] = date.fromisoformat(daily_updated['today'])
+        assets = json.load(file)
+        assets['today'] = date.fromisoformat(assets['today'])
         file.close()
     try:
         file = open('settings.json', encoding='utf-8')
