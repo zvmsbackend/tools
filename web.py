@@ -2,17 +2,16 @@ import re
 import time
 import sys
 import json
-import sqlite3
 import random
 import hashlib
 import logging
 import traceback
-from threading import Lock
 from functools import wraps
 from operator import itemgetter
 from datetime import date, datetime
 
 from flask import Flask, render_template, request, redirect, abort, session
+from flask_sqlalchemy import SQLAlchemy
 from tornado.httpserver import HTTPServer
 from tornado.wsgi import WSGIContainer
 from tornado.ioloop import IOLoop
@@ -24,27 +23,34 @@ import bs4
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'khfbyu4tgbukys'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///qncblog.db'
 CORS(app, supports_credential=True, resources={"/*", "*"})
 
+db = SQLAlchemy(app)
+app.app_context().push()
+
 logger = logging.getLogger()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s-%(name)s:%(message)s'
+)
 
 time.clock = time.perf_counter
 kernel = aiml.Kernel()
 kernel.verbose(False)
 kernel.loadBrain('aiml_brain')
 
-connection = sqlite3.connect('qncblog.db')
-cursor = connection.cursor()
-cursor.execute('SELECT user, session FROM ai')
-for user, aisession in cursor.fetchall():
+def execute_sql(sql: str, **kwargs):
+    return db.session.execute(sql, kwargs or None)
+
+for user, aisession in execute_sql('SELECT user, session FROM ai'):
     kernel._sessions[user] = json.loads(aisession)
     kernel._sessions[user]['_inputStack'] = []
     for field, flag in (('_inputHistory', 1), ('_outputHistory', 0)):
-        cursor.execute('SELECT content FROM aichat WHERE user = ? AND human = ?', (user, flag))
-        kernel._sessions[user][field] = list(map(itemgetter(0), cursor.fetchall()))
-connection.commit()
-connection.close()
+        kernel._sessions[user][field] = list(map(
+            itemgetter(0), 
+            execute_sql('SELECT content FROM aichat WHERE user = :user AND human = :human', user=user, human=flag)
+        ))
 
 with open('words.txt', encoding='utf-8') as file:
     words = list(map(str.strip, file))
@@ -62,8 +68,6 @@ settings = {
     'speed': 333,
     'offline': False
 }
-
-lock = Lock()
 
 def save_updated():
     tmp = daily_updated.copy()
@@ -116,11 +120,8 @@ def update(clear_muyu=True):
     
     if not clear_muyu:
         return
-    connection = sqlite3.connect('qncblog.db')
-    cursor = connection.cursor()
-    cursor.execute('DELETE FROM muyu')
-    connection.commit()
-    connection.close()
+    execute_sql('DELETE FROM muyu')
+    db.session.commit()
     logger.info('Muyu cleared')
 
 def comp(tag, name, *cls):
@@ -138,10 +139,7 @@ def get_weather():
 
 def query_word(word: str, verbose: bool):
     if verbose:
-        connection = sqlite3.connect('qncblog.db')
-        cursor = connection.cursor()
-        cursor.execute('SELECT v FROM dict WHERE k = ?', (word,))
-        res = cursor.fetchone()
+        res = execute_sql('SELECT v FROM dict WHERE k = :k', k=word).fetchone()
         if res is not None:
             return json.loads(res[0])
         soup = bs4.BeautifulSoup(requests.get('https://cn.bing.com/dict?q=' + word).text, 'lxml')
@@ -163,32 +161,11 @@ def query_word(word: str, verbose: bool):
             ):
                 ret['sens'].append((head, ['{} {}'.format(*comp(stc, 'div', 'bil_ex', 'val_ex'))
                                            for stc in body.find_all('div', {'class': 'li_ex'})]))
-        cursor.execute('INSERT INTO dict(k, v) VALUES(?, ?)', (word, json.dumps(ret, ensure_ascii=False)))
-        connection.commit()
-        connection.close()
+        execute_sql('INSERT INTO dict(k, v) VALUES(:k, :v)', k=word, v=json.dumps(ret, ensure_ascii=False))
+        db.session.commit()
         return ret
     soup = bs4.BeautifulSoup(requests.get('https://cn.bing.com/dict/SerpHoverTrans?q=' + word).text, 'lxml')
     return {'explainations': map(Tag.get_text, soup.find_all('li'))}
-
-def database_required(db: str):
-    if not isinstance(db, str):
-        return database_required('qncblog.db')(db)
-    def deco(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            #lock.acquire(timeout=1)
-            connection = sqlite3.connect(db)
-            cursor = connection.cursor()
-            try:
-                ret = fn(*args, **kwargs, cursor=cursor)
-                connection.commit()
-                return ret
-            finally:
-                connection.close()
-                #lock.release()
-            abort(500)
-        return wrapper
-    return deco
 
 def login_required(fn):
     @wraps(fn)
@@ -206,29 +183,35 @@ def view(fn):
         if date.today() != daily_updated['today']:
             update()
         try:
-            return fn(*args, **kwargs)
-        except sqlite3.OperationalError:
-            traceback.print_exc()
-            return render_template('error.html', msg='可能数据库被锁了')
+            ret = fn(*args, **kwargs)
+            db.session.commit()
+            return ret
         except Exception as ex:
+            db.session.rollback()
             traceback.print_exc()
             return render_template('error.html', msg='服务器遇到了{}'.format(ex.__class__.__qualname__))
     return wrapper
 
 @app.route('/', methods=['GET', 'POST'])
-@database_required
 @view
-def index(cursor: sqlite3.Cursor):
+def index():
     if request.method == 'GET':
         args = dict.fromkeys(('times', 'issues', 'notices'))
         id = session.get('id')
         if id is not None:
-            cursor.execute('SELECT COUNT(*) FROM issue WHERE author = ? AND time > ?', (id, daily_updated['today']))
-            args['times'] = cursor.fetchone()[0]
-            cursor.execute('SELECT content FROM issue WHERE author = ? ORDER BY ID DESC', (id,))
-            args['issues'] = map(itemgetter(0), cursor.fetchall())
-        cursor.execute('SELECT html FROM notice WHERE target IS NULL OR target = ? ORDER BY ID DESC', (id,))
-        args['notices'] = map(itemgetter(0), cursor.fetchall())
+            args['times'] = execute_sql(
+                'SELECT COUNT(*) FROM issue WHERE author = :id AND time > :today', 
+                id=id, 
+                today=daily_updated['today']
+            ).fetchone()[0]
+            args['issues'] = map(itemgetter(0), execute_sql(
+                'SELECT content FROM issue WHERE author = :id ORDER BY ID DESC',
+                id=id
+            ))
+        args['notices'] = map(itemgetter(0), execute_sql(
+            'SELECT html FROM notice WHERE target IS NULL OR target = :id ORDER BY ID DESC',
+            id=id
+        ))
         return render_template(
             'index.html',
             id=id,
@@ -241,8 +224,7 @@ def index(cursor: sqlite3.Cursor):
         return render_template('error.html', msg='表单校验错误')
     md5 = hashlib.md5()
     md5.update(pwd.encode())
-    cursor.execute('SELECT name FROM user WHERE id = ? AND pwd = ?', (id, md5.hexdigest()))
-    res = cursor.fetchone()
+    res = execute_sql('SELECT name FROM user WHERE id = :id AND pwd = :pwd', id=id, pwd=md5.hexdigest()).fetchone()
     if res is None:
         return render_template('error.html', msg='用户名或密码错误')
     session.update({
@@ -257,30 +239,27 @@ def icon():
 
 @app.route('/issue', methods=['POST'])
 @login_required
-@database_required
 @view
-def issues(id: int, cursor: sqlite3.Cursor):
-    cursor.execute('SELECT COUNT(*) FROM issue WHERE author = ? AND time > ?', (
-        id,
-        daily_updated['today']
-    ))
-    times = cursor.fetchone()[0]
+def issues(id: int):
+    times = execute_sql('SELECT COUNT(*) FROM issue WHERE author = :id AND time > :today',
+        id=id,
+        today=daily_updated['today']
+    ).fetchone()[0]
     if times >= 5:
         return render_template('error.html', msg='反馈已达上限')
     content = request.form.get('content')
     if not content or content.isspace() or len(content) > 64:
         return render_template('error.html', msg='表单校验错误')
-    cursor.execute('INSERT INTO issue(author, content, time) VALUES(?, ?, ?)', (
-        id, 
-        content,
-        datetime.now()
-    ))
+    execute_sql('INSERT INTO issue(author, content, time) VALUES(:author, :content, :time)',
+        author=id, 
+        content=content,
+        time=datetime.now()
+    )
     return render_template('success.html', msg='反馈成功')
 
 @app.route('/mod-pwd', methods=['POST'])
-@database_required
 @view
-def mod_pwd(cursor: sqlite3.Cursor):
+def mod_pwd():
     if request.method == 'GET':
         return render_template('modpwd.html', target=session.get('id'))
     target, old, new = map(request.form.get, ('target', 'old', 'new'))
@@ -291,12 +270,12 @@ def mod_pwd(cursor: sqlite3.Cursor):
     if session.get('id') != '20220905':
         md5 = hashlib.md5()
         md5.update(old.encode())
-        cursor.execute('SELECT * FROM user WHERE id = ? AND pwd = ?', (target, md5.hexdigest()))
-        if cursor.fetchone() is None:
+        res = execute_sql('SELECT * FROM user WHERE id = :id AND pwd = :pwd', id=target, pwd=md5.hexdigest()).fetchone()
+        if res is None:
             return render_template('error.html', msg='旧密码错误')
     md5 = hashlib.md5()
     md5.update(new.encode())
-    cursor.execute('UPDATE user SET pwd = ? WHERE id = ?', (md5.hexdigest(), target))
+    execute_sql('UPDATE user SET pwd = :pwd WHERE id = :id', id=target, pwd=md5.hexdigest())
     return render_template('success.html', msg='修改密码成功, 现在的密码是' + new)
 
 @app.route('/logout')
@@ -329,9 +308,8 @@ def query():
     )
 
 @app.route('/more')
-@database_required
 @view
-def more(cursor: sqlite3.Cursor):
+def more():
     word, offset = map(request.args.get, ('word', 'offset'))
     if None in (word, offset):
         return render_template('error.html', msg='缺乏参数')
@@ -339,8 +317,7 @@ def more(cursor: sqlite3.Cursor):
         offset = int(offset)
     except (ValueError, TypeError):
         return render_template('error.html', msg='参数类型错误')
-    cursor.execute('SELECT data FROM sen WHERE word = ? AND offset = ?', (word, offset))
-    res = cursor.fetchone()
+    res = execute_sql('SELECT data FROM sen WHERE word = :word AND offset = :offset', word=word, offset=offset).fetchone()
     if res is not None:
         return render_template('more.html', **json.loads(res[0]), word=word, offset=offset)
     res = requests.get('https://cn.bing.com/dict/service?q={}&offset={}&dtype=sen&&qs=n'.format(word, offset * 10 - 10))
@@ -350,17 +327,16 @@ def more(cursor: sqlite3.Cursor):
         return render_template('error.html', msg='无相关结果')
     pages = list(map(Tag.get_text, soup.find('div', {'class': 'b_pag'}).find_all('a', {'class': 'b_primtxt'})))
     more = list(map(Tag.get_text, soup.find_all('div', {'class': 'se_li'})))
-    cursor.execute('INSERT INTO sen(word, offset, data) VALUES(?, ?, ?)', (
-        word, 
-        offset, 
-        json.dumps({'pages': pages, 'more': more})
-    ))
+    execute_sql('INSERT INTO sen(word, offset, data) VALUES(:word, :offset, :data)',
+        word=word, 
+        offset=offset, 
+        data=json.dumps({'pages': pages, 'more': more})
+    )
     return render_template('more.html', more=more, pages=pages, word=word, offset=offset)
 
 @app.route('/wenyan')
-@database_required
 @view
-def wenyan(cursor: sqlite3.Cursor):
+def wenyan():
     word = request.args.get('word')
     if word is None:
         return render_template(
@@ -373,9 +349,8 @@ def wenyan(cursor: sqlite3.Cursor):
         return render_template('error.html', msg='查询过长')
     if not word:
         return render_template('error.html', msg='查询过短')
-    cursor.execute('SELECT v FROM wenyan WHERE k = ?', (word,))
-    res = cursor.fetchone()
-    if res is not None:
+    res = execute_sql('SELECT v FROM wenyan WHERE k = :k', k=word).fetchone()
+    if res:
         return render_template(
             **json.loads(res[0])
         )
@@ -416,7 +391,7 @@ def wenyan(cursor: sqlite3.Cursor):
         for head, cls in (('词语解释', 'jbjs'), ('网络解释', 'wljs')):
             tag = soup.find('div', {'class': cls})
             data['data'][head] = [] if tag is None else list(map(Tag.get_text, tag.find_all('li')))
-    cursor.execute('INSERT INTO wenyan(k, v) VALUES(?, ?)', (word, json.dumps(data, ensure_ascii=False)))
+    execute_sql('INSERT INTO wenyan(k, v) VALUES(:k, :v)', k=word, v=json.dumps(data, ensure_ascii=False))
     return render_template(
         **data
     )
@@ -437,42 +412,38 @@ def news():
     return render_template('news.html', **daily_updated['news'])
 
 @app.route('/birthday', methods=['GET', 'POST'])
-@database_required
 @view
-def birthday(cursor: sqlite3.Cursor):
+def birthday():
     if request.method == 'GET':
         today = daily_updated['today']
         args = {}
-        cursor.execute(
+        args['today'] = map(itemgetter(0), execute_sql(
             'SELECT name '
             'FROM user '
             'WHERE id IN '
             '(SELECT id '
             'FROM birthday '
-            'WHERE month = ? AND day = ?)', 
-            (today.month, today.day)
-        )
-        args['today'] = map(itemgetter(0), cursor.fetchall())
-        cursor.execute(
+            'WHERE month = :month AND day = :day)',
+            month=today.month, 
+            day=today.day
+        ))
+        args['thismonth'] = execute_sql(
             'SELECT u.name, b.day '
             'FROM birthday AS b '
             'JOIN user AS u '
             'ON b.id = u.id '
-            'WHERE b.month = ? '
+            'WHERE b.month = :month '
             'ORDER BY b.day',
-            (today.month,)
+            month=today.month
         )
-        args['thismonth'] = cursor.fetchall()
         args['month'] = today.month
-        cursor.execute('SELECT COUNT(*) from birthday')
-        args['count'] = cursor.fetchone()[0]
+        args['count'] = execute_sql('SELECT COUNT(*) FROM birthday').fetchone()[0]
         args['login'] = 'id' in session
         args['profile'] = None
         if args['login']:
-            cursor.execute('SELECT year, month, day FROM birthday WHERE id = ?', (session.get('id'),))
-            res = cursor.fetchone()
+            res = execute_sql('SELECT year, month, day FROM birthday WHERE id = :id', id=session.get('id')).fetchone()
             if res is not None:
-                args['profile'] = (session.get('name'),) + res
+                args['profile'] = (session.get('name'),) + tuple(res)
         return render_template('birthday.html', **args)
     if 'id' not in session:
         return render_template('error.html', msg='未登录')
@@ -480,15 +451,14 @@ def birthday(cursor: sqlite3.Cursor):
         birthday = date.fromisoformat(request.form.get('birthday'))
     except (ValueError, TypeError):
         return render_template('error.html', msg='错误的日期格式')
-    try:
-        cursor.execute('INSERT INTO birthday(id, year, month, day) VALUES(?, ?, ?, ?)', (
-            session.get('id'), 
-            birthday.year, 
-            birthday.month, 
-            birthday.day
-        ))
-    except sqlite3.IntegrityError:
+    if execute_sql('SELECT * FROM birthday WHERE id = :id', id=session.get('id')).fetchone() is not None:
         return render_template('error.html', msg='生日已注册')
+    execute_sql('INSERT INTO birthday(id, year, month, day) VALUES(:id, :year, :month, :day)', 
+        id=session.get('id'), 
+        year=birthday.year, 
+        month=birthday.month, 
+        day=birthday.day
+    )
     return redirect('/birthday')
 
 @app.route('/wallpapers')
@@ -517,15 +487,13 @@ def words_3500():
     return render_template('3500.html')
 
 @app.route('/muyu', methods=['GET', 'POST'])
-@database_required
 @view
-def muyu(cursor: sqlite3.Cursor):
+def muyu():
     if not settings['muyu']:
         return render_template('error.html', msg='都什么年代了还在抽传统反馈')
     id = session.get('id')
     if request.method == 'GET':
-        cursor.execute('SELECT count FROM muyu WHERE id = ?', (id,))
-        res = cursor.fetchone()
+        res = execute_sql('SELECT count FROM muyu WHERE id = :id', id=id).fetchone()
         return render_template(
             'muyu.html', 
             count=0 if res is None else res[0],
@@ -538,18 +506,16 @@ def muyu(cursor: sqlite3.Cursor):
         return render_template('error.html', msg='表单校验错误')
     if count == '0':
         return redirect('/muyu')
-    cursor.execute('SELECT count FROM muyu WHERE id = ?', (id,))
-    res = cursor.fetchone()
+    res = execute_sql('SELECT count FROM muyu WHERE id = :id', id=id).fetchone()
     if res is None:
-        cursor.execute('INSERT INTO muyu(id, count, anonymous) VALUES(?, ?, 0)', (id, count))
+        execute_sql('INSERT INTO muyu(id, count, anonymous) VALUES(:id, :count, 0)', id=id, count=count)
     else:
-        cursor.execute('UPDATE muyu SET count = count + ? WHERE id = ?', (count, id))
+        execute_sql('UPDATE muyu SET count = count + :count WHERE id = :id', id=id, count=count)
     return redirect('/muyu')
 
 @app.route('/muyu-ranking', methods=['GET', 'POST'])
-@database_required
 @view
-def muyu_ranking(cursor: sqlite3.Cursor):
+def muyu_ranking():
     if not settings['muyu']:
         return render_template('error.html', msg='都什么年代了还在抽传统反馈')
     id = session.get('id')
@@ -559,28 +525,27 @@ def muyu_ranking(cursor: sqlite3.Cursor):
             return render_template('error.html', msg='表单校验错误')
         if id is None:
             return render_template('error.html', msg='未登录')
-        cursor.execute('UPDATE muyu SET anonymous = ? WHERE id = ?', (anonymous, id))
+        execute_sql('UPDATE MUYU SET anonymous = :anonymous WHERE id = :id', id=id, anonymous=anonymous)
         return redirect('/muyu')
     login = id is not None
     anonymous = False
     if login:
-        cursor.execute('SELECT anonymous FROM muyu WHERE id = ?', (id,))
-        res = cursor.fetchone()
+        res = execute_sql('SELECT anonymous FROM muyu WHERE id = :id', id=id).fetchone()
         if res is None:
             login = False
         else:
             anonymous = res[0]
-    cursor.execute(
+    data = execute_sql(
         'SELECT u.name, m.id, m.count '
         'FROM muyu AS m '
         'JOIN user AS u '
         'ON u.id = m.id '
         'WHERE anonymous = 0 '
         'ORDER BY m.count DESC'
-    )
+    ).fetchall()
     return render_template(
         'ranking.html', 
-        data=enumerate(cursor.fetchall()),
+        data=enumerate(data),
         login=login,
         anonymous=anonymous
     )
@@ -590,36 +555,40 @@ def muyu_enabled():
     return ('false', 'true')[settings['muyu']]
 
 @app.route('/edit-notices', methods=['GET', 'POST'])
-@database_required
 @view
-def edit_notices(cursor: sqlite3.Cursor):
+def edit_notices():
     if session.get('id') != '20220905':
         return render_template('error.html', msg='FUCK YOU')
     if request.method == 'GET':
-        cursor.execute(
+        data = execute_sql(
             'SELECT u.name, n.id, n.target, n.html '
             'FROM notice AS n '
             'LEFT JOIN user AS u '
             'ON n.target = u.id '
             'ORDER BY n.id DESC'
-        )
-        return render_template('editnotices.html', data=cursor.fetchall())
+        ).fetchall()
+        return render_template('editnotices.html', data=data)
     if request.form.get('delete'):
-        cursor.execute('DELETE FROM notice WHERE id = ?', (request.form.get('id'),))
+        execute_sql('DELETE FROM notice WHERE id = :id', id=request.form.get('id'))
     else:
-        cursor.execute('UPDATE notice SET html = ? WHERE id = ?', (request.form.get('html'), request.form.get('id')))
+        execute_sql(
+            'UPDATE notice SET html = :html WHERE id = :id', 
+            id=request.form.get('id'), 
+            html=request.form.get('html')
+        )
     return redirect('/edit-notices')
 
 @app.route('/ai', methods=['GET', 'POST'])
 @login_required
-@database_required
 @view
-def ai(id: int, cursor: sqlite3.Cursor):
-    cursor.execute('SELECT COUNT(*) FROM aichat WHERE user = ? AND time > ?', (id, daily_updated['today']))
-    count = cursor.fetchone()[0]
+def ai(id: int):
+    count = execute_sql(
+        'SELECT COUNT(*) FROM aichat WHERE user = :id AND time > :today', 
+        id=id, 
+        today=daily_updated['today']
+    ).fetchone()[0]
     if request.method == 'GET':
-        cursor.execute('SELECT human, content FROM aichat WHERE user = ? ORDER BY time', (id,))
-        res = cursor.fetchall()
+        res = execute_sql('SELECT human, content FROM aichat WHERE user = :id ORDER BY time', id=id).fetchall()
         return render_template('ai.html', session=res, count=count, name=session.get('name'))
     if count >= 40:
         return render_template('error.html', msg='使用次数过多')
@@ -632,31 +601,35 @@ def ai(id: int, cursor: sqlite3.Cursor):
     response = kernel.respond(text, id)
     if not response:
         return render_template('error.html', msg='AIML没有响应')
-    cursor.execute('INSERT INTO aichat(user, human, content, time) VALUES(?, 1, ?, ?)', (id, text, now))
-    cursor.execute('INSERT INTO aichat(user, human, content, time) VALUES(?, 0, ?, ?)', (id, response, now))
+    for content, human in ((text, 1), (response, 0)):
+        execute_sql(
+            'INSERT INTO aichat(user, human, content, time) VALUES(:user, :human, :content, :time)',
+            user=id,
+            content=content,
+            human=human,
+            time=now
+        )
     aisession = json.dumps({k: v for k, v in kernel._sessions[id].items() if k[0] != '_'}, ensure_ascii=False)
-    cursor.execute('SELECT COUNT(*) FROM ai WHERE user = ?', (id,))
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO ai(user, session) VALUES(?, ?)', (id, aisession))
+    if execute_sql('SELECT COUNT(*) FROM ai WHERE user = :id', id=id).fetchone()[0] == 0:
+        execute_sql('INSERT INTO ai(user, session) VALUES(:user, :session)', user=id, session=aisession)
     else:
-        cursor.execute('UPDATE ai SET session = ? WHERE user = ?', (aisession, id))
+        execute_sql('UPDATE ai SET session = :session WHERE user = :user', user=id, session=aisession)
     return redirect('/ai')
 
 @app.route('/admin', methods=['GET', 'POST'])
-@database_required
 @view
-def admin(cursor: sqlite3.Cursor):
+def admin():
     if session.get('id') != '20220905':
         return render_template('error.html', msg='FUCK YOU')
     if request.method == 'GET':
-        cursor.execute(
+        issues = execute_sql(
             'SELECT u.name, i.author, i.content '
             'FROM issue AS i '
             'JOIN user AS u '
             'ON i.author = u.id '
             'ORDER BY i.id DESC'
-        )
-        return render_template('admin.html', issues=cursor.fetchall(), settings=settings)
+        ).fetchall()
+        return render_template('admin.html', issues=issues, settings=settings)
     match request.form:
         case {'task': 'set-muyu'}:
             save_settings(muyu=not settings['muyu'])
@@ -672,48 +645,60 @@ def admin(cursor: sqlite3.Cursor):
             save_updated()
             return redirect('/hitokoto')
         case {'task': 'send-notice', 'target': target, 'html': html}:
-            cursor.execute(
-                'INSERT INTO notice(target, html) VALUES(?, ?)',
-                (target or None, html)
+            execute_sql(
+                'INSERT INTO notice(target, html) VALUES(:target, :html)', 
+                target=target or None, 
+                html=html
             )
             return render_template('success.html', msg='通知发送给了{}'.format(target))
         case {'task': 'mod-birthday', 'birthday': birthday, 'target': target}:
             birthday = date.fromisoformat(birthday)
-            cursor.execute(
-                'UPDATE birthday '
-                'SET year = ?, month = ?, day = ? '
-                'WHERE id = ?',
-                (birthday.year, birthday.month, birthday.day, target)
-            )
+            args = {
+                'id': target,
+                'year': birthday.year,
+                'month': birthday.month,
+                'day': birthday.day
+            }
+            if execute_sql('SELECT * FROM birthday WHERE id = :id', id=target).fetchone() is None:
+                execute_sql(
+                    'INSERT INTO birthday(id, year, month, day) '
+                    'VALUES(:id, :year, :month, :day)',
+                    **args
+                )
+            else:
+                execute_sql(
+                    'UPDATE birthday '
+                    'SET year = :year, month = :month, day = :day '
+                    'WHERE id = :id',
+                    **args
+                )
             return render_template('success.html', msg='修改了' + target)
         case {'task': 'del-birthday', 'target': target}:
-            cursor.execute('DELETE FROM birthday WHERE id = ?', (target,))
+            execute_sql('DELETE FROM birthday WHERE id = :id', id=target)
             return render_template('success.html', msg='删除了{}'.format(target))
         case {'task': 'query-id', 'id': id}:
-            cursor.execute('SELECT name FROM user WHERE id = ?', (id,))
-            res = cursor.fetchone()
+            res = execute_sql('SELECT name FROM user WHERE id = :id', id=id).fetchone()
             if res is None:
                 return render_template('error.html', msg='未查询到' + id)
             return render_template('success.html', msg=res[0])
         case {'task': 'query-name', 'name': name}:
-            cursor.execute('SELECT id, name FROM user WHERE name LIKE ?', ('%' + name + '%',))
-            return render_template('success.html', msg=str(cursor.fetchall()))
+            msg = execute_sql('SELECT id, name FROM user WHERE name LIKE :name', name='%' + name + '%').fetchall()
+            return render_template('success.html', msg=str(msg))
         case {'task': 'login', 'id': id}:
-            cursor.execute('SELECT name FROM user WHERE id = ?', (id,))
             session.update({
                 'id': id,
-                'name': cursor.fetchone()[0]
+                'name': execute_sql('SELECT name FROM user WHERE id = :id', id=id).fetchone()[0]
             })
             return redirect('/')
         case {'task': 'set-count', 'id': id, 'count': count}:
             if count == '0':
-                cursor.execute('DELETE FROM muyu WHERE id = ?', (id,))
+                execute_sql('DELETE FROM muyu WHERE id = :id', id=id)
             else:
-                cursor.execute('SELECT COUNT(*) FROM muyu WHERE id = ?', (id,))
-                if cursor.fetchone()[0] > 0:
-                    cursor.execute('UPDATE muyu SET count = ? WHERE id = ?', (count, id))
+                res = execute_sql('SELECT COUNT(*) FROM muyu WHERE id = :id', id=id).fetchone()[0]
+                if res > 0:
+                    execute_sql('UPDATE muyu SET count = :count WHERE id = :id', id=id, count=count)
                 else:
-                    cursor.execute('INSERT INTO muyu(id, count) VALUES(?, ?)', (id, count))
+                    execute_sql('INSERT INTO muyu(id, count) VALUES(:id, :count)', id=id, count=count)
             return render_template('success.html', msg='将{}的木鱼设置为{}'.format(id, count))
         case {'task': 'muyu-speed', 'speed': speed}:
             save_settings(speed=speed)
@@ -722,7 +707,7 @@ def admin(cursor: sqlite3.Cursor):
             save_settings(offline=not settings['offline'])
             return render_template('success.html', msg='木鱼{}允许离线运行'.format('' if settings['offline'] else '不'))
         case {'task': 'clear-issues'}:
-            cursor.execute('DELETE FROM issue')
+            execute_sql('DELETE FROM issue')
             return render_template('success.html', msg='清除成功')
         case _:
             return render_template('error.html', msg='无效参数: ' + str(request.form))
