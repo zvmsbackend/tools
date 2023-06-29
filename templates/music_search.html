@@ -5,11 +5,11 @@
 {% for music in data %}
 <h2>{{music.name}}</h2>
 <h4>{{music.url}}</h4>
-<!-- <ul>
+<ul>
     {% for artist in music.artists %}
     <li>{{artist.name}}</li>
     {% endfor %}
-</ul> -->
+</ul>
 <audio controls>
     <source src="{{music.url}}">
 </audio>

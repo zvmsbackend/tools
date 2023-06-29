@@ -628,7 +628,10 @@ def music_search():
         return render_template('error.html', msg='FUCK YOU')
     if request.method == 'GET':
         data = json.loads(requests.get(
-            'https://music-api.tonzhon.com/search?keyword={}&platform=qq&limit=25'.format(request.args.get('keyword'))
+            'https://music-api.tonzhon.com/search?keyword={}&platform={}&limit=25'.format(
+                request.args.get('keyword'),
+                request.args.get('platform')
+            )
         ).text)['data']['songs']
         for datum in data:
             datum['url'] = json.loads(requests.get('https://music-api.tonzhon.com/song_file/' + datum['newId']).text)['data']['songSource']
